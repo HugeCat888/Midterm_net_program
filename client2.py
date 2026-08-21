@@ -1,378 +1,124 @@
 import asyncio
 import json
-
+import sys
 
 HOST = "127.0.0.1"
 PORT = 5000
 
 
+# ---------------------------------------------------------
+# Sends one JSON event to the server (one line + "\n")
+# ---------------------------------------------------------
 async def send_event(writer, event, data):
+    message = {"event": event, "data": data}
+    raw = json.dumps(message, ensure_ascii=False) + "\n"
 
-    message = {
-        "event": event,
-        "data": data
-    }
-
-    raw = json.dumps(
-        message,
-        ensure_ascii=False
-    ) + "\n"
-
-    writer.write(
-        raw.encode("utf-8")
-    )
-
+    writer.write(raw.encode("utf-8"))
     await writer.drain()
 
 
+# ---------------------------------------------------------
+# Prints a line without leaving a leftover blank "user > "
+# prompt above it. "\r" moves to start of line and "\033[K"
+# clears it, wiping out the empty prompt before we print,
+# then the prompt is redrawn so the user can keep typing.
+# ---------------------------------------------------------
+current_prompt = ""
+
+def print_clean(text):
+    sys.stdout.write("\r\033[K" + text + "\n" + current_prompt)
+    sys.stdout.flush()
+
+
+# ---------------------------------------------------------
+# Background task: continuously listens for events from the
+# server and prints them. This is how incoming messages
+# (from anyone, including replies) show up on screen.
+# ---------------------------------------------------------
 async def receive_events(reader):
-
     while True:
-
         line = await reader.readline()
 
         if not line:
-            print("\n[SERVER] Connection closed")
+            print_clean("[SERVER] Connection closed")
             break
 
         try:
-
-            response = json.loads(
-                line.decode("utf-8")
-            )
-
+            response = json.loads(line.decode("utf-8"))
             event = response.get("event")
             data = response.get("data", {})
 
-            if event == "chat":
-
-                print(
-                    f"\n[{data['room']}] "
-                    f"{data['from']}: "
-                    f"{data['message']}"
-                )
-
-            elif event == "private_chat":
-
-                print(
-                    f"\n[PM] "
-                    f"{data['from']}: "
-                    f"{data['message']}"
-                )
-
-            elif event == "broadcast":
-
-                print(
-                    f"\n[BROADCAST] "
-                    f"{data['from']}: "
-                    f"{data['message']}"
-                )
+            if event == "message":
+                # Shows who sent the message -> works for both new
+                # messages and replies, since a reply is just another message.
+                print_clean(f"{data['from']}: {data['message']}")
 
             elif event == "user_joined":
-
-                print(
-                    f"\n[ROOM] "
-                    f"{data['username']} joined "
-                    f"{data['room']}"
-                )
-
-            elif event == "user_left":
-
-                print(
-                    f"\n[ROOM] "
-                    f"{data['username']} left "
-                    f"{data['room']}"
-                )
+                print_clean(f"[ROOM] {data['username']} joined the chat")
 
             elif event == "user_disconnected":
-
-                print(
-                    f"\n[ROOM] "
-                    f"{data['username']} disconnected"
-                )
-
-            elif event == "users":
-
-                print("\n[ONLINE USERS]")
-
-                for username in data["users"]:
-                    print(f"- {username}")
-
-            elif event == "rooms":
-
-                print("\n[ROOMS]")
-
-                for room, members in data["rooms"].items():
-
-                    print(
-                        f"- {room}: "
-                        f"{', '.join(members)}"
-                    )
+                print_clean(f"[ROOM] {data['username']} disconnected")
 
             elif event == "error":
-
-                print(
-                    f"\n[ERROR] "
-                    f"{data['message']}"
-                )
+                print_clean(f"[ERROR] {data['message']}")
 
             elif event == "create_user_success":
-
-                print(
-                    f"\n[CONNECTED] "
-                    f"Username: {data['username']}"
-                )
-
-            elif event == "join_room_success":
-
-                print(
-                    f"\n[JOINED] "
-                    f"{data['room']}"
-                )
-
-            elif event == "leave_room_success":
-
-                print(
-                    f"\n[LEFT] "
-                    f"{data['room']}"
-                )
+                print_clean(f"[CONNECTED] Username: {data['username']}")
 
         except json.JSONDecodeError:
-
-            print("[ERROR] Invalid JSON")
-
-
-def print_help():
-
-    print("""
-========================================
-Commands
-========================================
-
-/join <room>
-    Join a room
-
-/leave <room>
-    Leave a room
-
-/msg <room> <message>
-    Send message to room
-
-/pm <user> <message>
-    Private message
-
-/broadcast <message>
-    Broadcast to everyone
-
-/users
-    Show online users
-
-/rooms
-    Show rooms
-
-/quit
-    Disconnect
-
-/help
-    Show this help
-
-========================================
-""")
+            print_clean("[ERROR] Invalid JSON received")
 
 
+# ---------------------------------------------------------
+# Main flow: connect, log in, then loop reading user input
+# and sending it as a "message" event to the server.
+# ---------------------------------------------------------
 async def main():
-
-    reader, writer = await asyncio.open_connection(
-        HOST,
-        PORT
-    )
-
+    reader, writer = await asyncio.open_connection(HOST, PORT)
     print("Connected to server")
 
+    # --- login ---
     username = input("Username: ")
+    if len(username) == 0:
+        username = "Anonymous"
+    await send_event(writer, "create_user", {"username": username})
 
-    await send_event(
-        writer,
-        "create_user",
-        {
-            "username": username
-        }
-    )
-
-    response = await reader.readline()
-
-    response = json.loads(
-        response.decode("utf-8")
-    )
+    response = json.loads((await reader.readline()).decode("utf-8"))
 
     if response["event"] == "error":
-
-        print(
-            f"Error: "
-            f"{response['data']['message']}"
-        )
-
+        print(f"Error: {response['data']['message']}")
         writer.close()
         await writer.wait_closed()
-
         return
 
-    print(
-        f"Logged in as "
-        f"{username}"
-    )
+    print(f"Logged in as {username}")
 
-    print_help()
+    # Start listening for messages in the background so we can
+    # receive and send at the same time.
+    receive_task = asyncio.create_task(receive_events(reader))
 
-    receive_task = asyncio.create_task(
-        receive_events(reader)
-    )
+    global current_prompt
+    current_prompt = f"{username} > "
 
     try:
-
         while True:
+            text = await asyncio.to_thread(input, current_prompt)
 
-            command = await asyncio.to_thread(
-                input,
-                "> "
-            )
-
-            if not command:
+            if not text:
                 continue
 
-            parts = command.split(" ", 2)
-
-            cmd = parts[0]
-
-            if cmd == "/join":
-
-                if len(parts) < 2:
-                    print("Usage: /join <room>")
-                    continue
-
-                await send_event(
-                    writer,
-                    "join_room",
-                    {
-                        "room": parts[1]
-                    }
-                )
-
-            elif cmd == "/leave":
-
-                if len(parts) < 2:
-                    print("Usage: /leave <room>")
-                    continue
-
-                await send_event(
-                    writer,
-                    "leave_room",
-                    {
-                        "room": parts[1]
-                    }
-                )
-
-            elif cmd == "/msg":
-
-                if len(parts) < 3:
-                    print(
-                        "Usage: "
-                        "/msg <room> <message>"
-                    )
-
-                    continue
-
-                await send_event(
-                    writer,
-                    "chat",
-                    {
-                        "room": parts[1],
-                        "message": parts[2]
-                    }
-                )
-
-            elif cmd == "/pm":
-
-                if len(parts) < 3:
-                    print(
-                        "Usage: "
-                        "/pm <user> <message>"
-                    )
-
-                    continue
-
-                await send_event(
-                    writer,
-                    "private_chat",
-                    {
-                        "to": parts[1],
-                        "message": parts[2]
-                    }
-                )
-
-            elif cmd == "/broadcast":
-
-                if len(parts) < 2:
-                    print(
-                        "Usage: "
-                        "/broadcast <message>"
-                    )
-
-                    continue
-
-                await send_event(
-                    writer,
-                    "broadcast",
-                    {
-                        "message": parts[1]
-                    }
-                )
-
-            elif cmd == "/users":
-
-                await send_event(
-                    writer,
-                    "list_users",
-                    {}
-                )
-
-            elif cmd == "/rooms":
-
-                await send_event(
-                    writer,
-                    "list_rooms",
-                    {}
-                )
-
-            elif cmd == "/help":
-
-                print_help()
-
-            elif cmd == "/quit":
-
-                await send_event(
-                    writer,
-                    "disconnect",
-                    {}
-                )
-
+            if text == "/quit":
+                await send_event(writer, "disconnect", {})
                 break
 
-            else:
-
-                print(
-                    "Unknown command. "
-                    "Use /help"
-                )
+            # Anything typed is just sent as a message.
+            # Replying works the same way -> type and send.
+            await send_event(writer, "message", {"message": text})
 
     finally:
-
         receive_task.cancel()
-
         writer.close()
-
         await writer.wait_closed()
-
         print("Disconnected")
 
 
